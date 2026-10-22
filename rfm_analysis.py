@@ -1,48 +1,113 @@
 
-from datetime import datetime
-from collections import defaultdict
+import pandas as pd
+from pathlib import Path
 
-# Demonstration data only — not real customer records
-transactions = [
-    ("C001", "2026-10-20", 2500),
-    ("C001", "2026-10-15", 1800),
-    ("C001", "2026-09-30", 3200),
-    ("C002", "2026-08-10", 900),
-    ("C003", "2026-10-18", 4500),
-    ("C003", "2026-10-10", 2000),
-    ("C004", "2026-05-01", 500),
-    ("C005", "2026-10-21", 7000),
-]
+# Project configuration
+DATA_FILE = Path("transactions.csv")
+ANALYSIS_DATE = pd.Timestamp("2026-10-23")
 
-analysis_date = datetime(2026, 10, 23)
-customers = defaultdict(list)
+def load_data(file_path):
+    """Load and validate transaction data."""
+    df = pd.read_csv(file_path)
 
-for customer_id, date, amount in transactions:
-    purchase_date = datetime.strptime(date, "%Y-%m-%d")
-    customers[customer_id].append((purchase_date, amount))
+    required = {"customer_id", "order_date", "amount"}
+    if not required.issubset(df.columns):
+        raise ValueError(f"CSV must contain: {required}")
 
-print("E-COMMERCE CUSTOMER SEGMENTATION")
-print("-" * 65)
+    df["order_date"] = pd.to_datetime(
+        df["order_date"], errors="coerce"
+    )
+    df["amount"] = pd.to_numeric(
+        df["amount"], errors="coerce"
+    )
 
-for customer_id, purchases in sorted(customers.items()):
-    last_purchase = max(date for date, amount in purchases)
+    df = df.dropna(
+        subset=["customer_id", "order_date", "amount"]
+    )
 
-    recency = (analysis_date - last_purchase).days
-    frequency = len(purchases)
-    monetary = sum(amount for date, amount in purchases)
+    if (df["amount"] < 0).any():
+        raise ValueError("Transaction amounts cannot be negative.")
 
-    if recency <= 30 and frequency >= 3:
-        segment = "Loyal Customer"
-    elif recency <= 30 and monetary >= 4000:
-        segment = "High Value Customer"
-    elif recency > 90:
-        segment = "At Risk Customer"
-    else:
-        segment = "Regular Customer"
+    if df.empty:
+        raise ValueError("No valid transactions found.")
 
-    print(f"Customer: {customer_id}")
-    print(f"Recency: {recency} days")
-    print(f"Frequency: {frequency} purchases")
-    print(f"Monetary Value: INR {monetary}")
-    print(f"Segment: {segment}")
-    print("-" * 65)
+    return df
+
+def calculate_rfm(df, analysis_date):
+    """Calculate Recency, Frequency and Monetary value."""
+    rfm = df.groupby("customer_id").agg(
+        last_purchase=("order_date", "max"),
+        frequency=("order_date", "count"),
+        monetary=("amount", "sum")
+    )
+
+    rfm["recency"] = (
+        analysis_date - rfm["last_purchase"]
+    ).dt.days
+
+    if (rfm["recency"] < 0).any():
+        raise ValueError(
+            "Transactions cannot occur after the analysis date."
+        )
+
+    # Score 1–5: 5 is best for all three metrics.
+    # Lower recency is better, so reverse its ranking.
+    rfm["R_score"] = pd.qcut(
+        rfm["recency"].rank(method="first", ascending=False),
+        5, labels=[1, 2, 3, 4, 5]
+    ).astype(int)
+
+    rfm["F_score"] = pd.qcut(
+        rfm["frequency"].rank(method="first"),
+        5, labels=[1, 2, 3, 4, 5]
+    ).astype(int)
+
+    rfm["M_score"] = pd.qcut(
+        rfm["monetary"].rank(method="first"),
+        5, labels=[1, 2, 3, 4, 5]
+    ).astype(int)
+
+    rfm["RFM_score"] = (
+        rfm["R_score"].astype(str)
+        + rfm["F_score"].astype(str)
+        + rfm["M_score"].astype(str)
+    )
+
+    def segment(row):
+        if row["R_score"] >= 4 and row["F_score"] >= 4:
+            return "Loyal Customers"
+        if row["R_score"] >= 4 and row["M_score"] >= 4:
+            return "High Value Customers"
+        if row["R_score"] <= 2:
+            return "At Risk Customers"
+        return "Regular Customers"
+
+    rfm["segment"] = rfm.apply(segment, axis=1)
+    return rfm.reset_index()
+
+def main():
+    transactions = load_data(DATA_FILE)
+    rfm = calculate_rfm(transactions, ANALYSIS_DATE)
+
+    output_file = "customer_segments.csv"
+    rfm.to_csv(output_file, index=False)
+
+    print("\nECOMMERCE CUSTOMER SEGMENTATION")
+    print("=" * 50)
+    print(f"Transactions analysed: {len(transactions)}")
+    print(f"Customers analysed: {len(rfm)}")
+    print("\nSegment summary:")
+    print(rfm["segment"].value_counts().to_string())
+    print(f"\nReport saved to {output_file}")
+
+    print("\nCustomer report:")
+    print(
+        rfm[["customer_id", "recency", "frequency",
+             "monetary", "RFM_score", "segment"]]
+        .sort_values("monetary", ascending=False)
+        .to_string(index=False)
+    )
+
+if __name__ == "__main__":
+    main()
+
